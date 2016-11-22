@@ -81,6 +81,7 @@ require jq
 # Setup default values for variables
 CLUSTER=false
 SERVICE=false
+TASK_ROLE=false
 TASK_DEFINITION=false
 MAX_DEFINITIONS=0
 IMAGE=false
@@ -309,7 +310,7 @@ DEF=$( $AWS_ECS describe-task-definition --task-def $TASK_DEFINITION \
         | jq '.taskDefinition' )
 
 # Default JQ filter for new task definition
-NEW_DEF_JQ_FILTER="family: .family, volumes: .volumes, containerDefinitions: .containerDefinitions"
+NEW_DEF_JQ_FILTER="family: .family, volumes: .volumes, containerDefinitions: .containerDefinitions, taskRoleArn: .taskRoleArn"
 
 # Some options in task definition should only be included in new definition if present in
 # current definition. If found in current definition, append to JQ filter.
