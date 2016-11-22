@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-set -e
+set -o errexit
+set -o pipefail
+set -u
 
 function usage() {
     set -e
@@ -64,7 +66,7 @@ if [ $# == 0 ]; then usage; fi
 
 # Check requirements
 function require {
-    command -v $1 > /dev/null 2>&1 || {
+    command -v "$1" > /dev/null 2>&1 || {
         echo "Some of the required software is not installed:"
         echo "    please install $1" >&2;
         exit 1;
@@ -79,6 +81,7 @@ require jq
 # Setup default values for variables
 CLUSTER=false
 SERVICE=false
+TASK_ROLE=false
 TASK_DEFINITION=false
 MAX_DEFINITIONS=0
 IMAGE=false
@@ -91,7 +94,7 @@ AWS_CLI=$(which aws)
 AWS_ECS="$AWS_CLI --output json ecs"
 
 # Loop through arguments, two at a time for key and value
-while [[ $# > 0 ]]
+while [[ $# -gt 0 ]]
 do
     key="$1"
 
@@ -113,6 +116,7 @@ do
             shift # past argument
             ;;
         --aws-instance-profile)
+            echo "--aws-instance-profile is not yet in use"
             AWS_IAM_ROLE=true
             ;;
         -c|--cluster)
@@ -213,7 +217,7 @@ fi
 # - image
 # - tag
 # If a group is missing it will be an empty string
-imageRegex="^([a-zA-Z0-9.\-]+):?([0-9]+)?/([a-zA-Z0-9_-]+)/?([a-zA-Z0-9_-]+)?:?([a-zA-Z0-9\._-]+)?$"
+imageRegex="^([a-zA-Z0-9.\-]+):?([0-9]+)?/([a-zA-Z0-9._-]+)/?([a-zA-Z0-9._-]+)?:?([a-zA-Z0-9\._-]+)?$"
 
 if [[ $IMAGE =~ $imageRegex ]]; then
   # Define variables from matching groups
@@ -265,16 +269,18 @@ fi
 
 # Reassemble image name
 useImage=""
-if [[ "x$domain" != "x" ]]; then
+if [[ ! -z ${domain+undefined-guard} ]]; then
   useImage="$domain"
 fi
-if [[ "x$port" != "x" ]]; then
+if [[ ! -z ${port} ]]; then
   useImage="$useImage:$port"
 fi
-if [[ "x$repo" != "x" ]]; then
+if [[ ! -z ${repo+undefined-guard} ]]; then
+ if [[ ! "x$repo" == "x" ]]; then
   useImage="$useImage/$repo"
+ fi
 fi
-if [[ "x$img" != "x" ]]; then
+if [[ ! -z ${img+undefined-guard} ]]; then
   if [[ "x$useImage" == "x" ]]; then
     useImage="$img"
   else
@@ -282,7 +288,7 @@ if [[ "x$img" != "x" ]]; then
   fi
 fi
 imageWithoutTag="$useImage"
-if [[ "x$tag" != "x" ]]; then
+if [[ ! -z ${tag+undefined-guard} ]]; then
   useImage="$useImage:$tag"
 fi
 
@@ -301,10 +307,26 @@ echo "Current task definition: $TASK_DEFINITION";
 DEF=$( $AWS_ECS describe-task-definition --task-def $TASK_DEFINITION \
         | sed -e "s|\"image\": *\"${imageWithoutTag}:.*\"|\"image\": \"${useImage}\"|g" \
         | sed -e "s|\"image\": *\"${imageWithoutTag}\"|\"image\": \"${useImage}\"|g" \
-        | jq '.taskDefinition|if .networkMode then {family: .family, volumes: .volumes, containerDefinitions: .containerDefinitions, networkMode: .networkMode} else {family: .family, volumes: .volumes, containerDefinitions: .containerDefinitions} end' )
+        | jq '.taskDefinition' )
+
+# Default JQ filter for new task definition
+NEW_DEF_JQ_FILTER="family: .family, volumes: .volumes, containerDefinitions: .containerDefinitions"
+
+# Some options in task definition should only be included in new definition if present in
+# current definition. If found in current definition, append to JQ filter.
+CONDITIONAL_OPTIONS=(networkMode taskRoleArn)
+for i in "${CONDITIONAL_OPTIONS[@]}"; do
+  re=".*${i}.*"
+  if [[ "$DEF" =~ $re ]]; then
+    NEW_DEF_JQ_FILTER="${NEW_DEF_JQ_FILTER}, ${i}: .${i}"
+  fi
+done
+
+# Build new DEF with jq filter
+NEW_DEF=$(echo $DEF | jq "{${NEW_DEF_JQ_FILTER}}")
 
 # Register the new task definition, and store its ARN
-NEW_TASKDEF=`$AWS_ECS register-task-definition --cli-input-json "$DEF" | jq -r .taskDefinition.taskDefinitionArn`
+NEW_TASKDEF=`$AWS_ECS register-task-definition --cli-input-json "$NEW_DEF" | jq -r .taskDefinition.taskDefinitionArn`
 echo "New task definition: $NEW_TASKDEF";
 
 if [ $SERVICE == false ]; then
@@ -322,7 +344,7 @@ else
   fi
 
   DESIRED_COUNT=""
-  if [ ! -z "$DESIRED" ]; then
+  if [ ! -z ${DESIRED+undefined-guard} ]; then
     DESIRED_COUNT="--desired-count $DESIRED"
   fi
 
